@@ -1,13 +1,13 @@
 <?php $title = t('nav.dashboard'); ?>
 <div class="page-head">
   <h1><?= h(t('dashboard.title', ['name' => $user['name']])) ?></h1>
-  <a class="btn btn-primary" href="<?= h(url('event/new')) ?>"><?= h(t('dashboard.new_event')) ?></a>
+  <?php if (can_organize($user)): ?><a class="btn btn-primary" href="<?= h(url('event/new')) ?>"><?= h(t('dashboard.new_event')) ?></a><?php endif; ?>
 </div>
 
 <section class="card">
   <h2><?= h(t('dashboard.my_events')) ?></h2>
   <?php if (!$events): ?>
-    <p class="muted"><?= h(t('dashboard.no_events')) ?></p>
+    <p class="muted"><?= h(can_organize($user) ? t('dashboard.no_events') : t('dashboard.not_organizer', ['club' => club_name()])) ?></p>
   <?php else: ?>
     <div class="table-wrap"><table>
       <thead><tr><th><?= h(t('event.title')) ?></th><th><?= h(t('event.date')) ?></th><th><?= h(t('event.registrations')) ?></th><th><?= h(t('event.status')) ?></th></tr></thead>

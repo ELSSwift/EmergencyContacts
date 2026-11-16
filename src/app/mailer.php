@@ -2,19 +2,35 @@
 declare(strict_types=1);
 
 /*
- * Einfacher Mailversand.
- *  transport = file : E-Mails werden als .eml in data/mail abgelegt (DEV)
+ * Einfacher Mailversand (Einstellungen unter „Verein verwalten“ → E-Mail-Versand).
+ *  transport = file : E-Mails werden als .eml in data/mail abgelegt (Postausgang, zum Testen)
  *  transport = smtp : Versand über SMTP (optional STARTTLS/SSL + AUTH LOGIN)
  *  transport = mail : PHP mail()
  */
 
+/** Fehlermeldung des letzten fehlgeschlagenen Versands (für die Testmail). */
+function mail_last_error(): string
+{
+    return (string)($GLOBALS['mail_last_error'] ?? '');
+}
+
 function send_mail(string $to, string $subject, string $body): bool
 {
+    $GLOBALS['mail_last_error'] = '';
     if (!valid_email($to)) {
+        $GLOBALS['mail_last_error'] = 'Ungültige Empfängeradresse';
         return false;
     }
-    $from = (string)config('mail.from');
-    $fromName = (string)config('mail.from_name');
+    $subject = str_replace('{club}', club_name(), $subject);
+    $body = str_replace('{club}', club_name(), $body);
+    $from = (string)setting('mail_from');
+    if (!valid_email($from)) {
+        $GLOBALS['mail_last_error'] = 'Keine gültige Absenderadresse eingestellt';
+        app_log('Mail FEHLER an ' . $to . ': ' . $GLOBALS['mail_last_error']);
+        return false;
+    }
+    $fromName = trim((string)setting('mail_from_name')) ?: club_name();
+    $replyTo = trim((string)setting('mail_reply_to')) ?: trim((string)setting('contact_email'));
     $encodedSubject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
     $headers = [
         'From' => '=?UTF-8?B?' . base64_encode($fromName) . '?= <' . $from . '>',
@@ -27,17 +43,24 @@ function send_mail(string $to, string $subject, string $body): bool
         'Content-Transfer-Encoding' => 'base64',
         'Auto-Submitted' => 'auto-generated',
     ];
+    if ($replyTo !== '' && valid_email($replyTo)) {
+        $headers['Reply-To'] = $replyTo;
+    }
     $encodedBody = chunk_split(base64_encode($body));
 
     try {
-        $ok = match (config('mail.transport')) {
+        $ok = match (mail_transport()) {
             'smtp' => smtp_send($from, $to, $headers, $encodedBody),
             'mail' => mail($to, $encodedSubject, $encodedBody, array_diff_key($headers, ['To' => 1, 'Subject' => 1])),
             default => mail_to_file($to, $subject, $headers, $encodedBody, $body),
         };
     } catch (Throwable $e) {
         app_log('Mailversand fehlgeschlagen an ' . $to . ': ' . $e->getMessage());
+        $GLOBALS['mail_last_error'] = $e->getMessage();
         $ok = false;
+    }
+    if (!$ok && mail_last_error() === '') {
+        $GLOBALS['mail_last_error'] = 'Versand fehlgeschlagen (siehe data/logs)';
     }
     app_log('Mail ' . ($ok ? 'gesendet' : 'FEHLER') . ' an ' . $to . ': ' . $subject);
     return $ok;
@@ -60,11 +83,14 @@ function mail_to_file(string $to, string $subject, array $headers, string $encod
 
 function smtp_send(string $from, string $to, array $headers, string $encodedBody): bool
 {
-    $host = (string)config('mail.smtp_host');
-    $port = (int)config('mail.smtp_port');
-    $secure = (string)config('mail.smtp_secure');
+    $host = (string)setting('mail_smtp_host');
+    $port = (int)setting('mail_smtp_port');
+    $secure = (string)setting('mail_smtp_secure');
+    if ($host === '' || $port < 1) {
+        throw new RuntimeException('SMTP-Server ist nicht eingestellt');
+    }
     $remote = ($secure === 'ssl' ? 'ssl://' : 'tcp://') . $host . ':' . $port;
-    $fp = stream_socket_client($remote, $errno, $errstr, 15);
+    $fp = @stream_socket_client($remote, $errno, $errstr, 15);
     if (!$fp) {
         throw new RuntimeException("SMTP-Verbindung fehlgeschlagen: $errstr ($errno)");
     }
@@ -98,11 +124,11 @@ function smtp_send(string $from, string $to, array $headers, string $encodedBody
         }
         $cmd('EHLO ' . $ehloHost, [250]);
     }
-    $user = (string)config('mail.smtp_user');
+    $user = (string)setting('mail_smtp_user');
     if ($user !== '') {
         $cmd('AUTH LOGIN', [334]);
         $cmd(base64_encode($user), [334]);
-        $cmd(base64_encode((string)config('mail.smtp_pass')), [235]);
+        $cmd(base64_encode(smtp_password()), [235]);
     }
     $cmd('MAIL FROM:<' . $from . '>', [250]);
     $cmd('RCPT TO:<' . $to . '>', [250, 251]);

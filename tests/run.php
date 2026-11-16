@@ -113,6 +113,96 @@ check('Protokoll der anonymen Anmeldung gelöscht', (int)db_one('SELECT COUNT(*)
 check('Anmeldung mit Konto bleibt', find_registration_by_token($acc['edit_token']) !== null);
 check('Event abgeschlossen, kein Zugriff', !event_access_active(find_event($evId)));
 
+echo "Rollen\n";
+$orgaUser = db_one('SELECT * FROM users WHERE id = ?', [$owner]);
+$memberUser = db_one('SELECT * FROM users WHERE id = ?', [$member]);
+check('Erstes Konto ist Admin', $orgaUser['role'] === 'admin' && is_admin($orgaUser));
+check('Weitere Konten sind Mitglieder', $memberUser['role'] === 'user' && !can_organize($memberUser));
+db_exec("UPDATE users SET role = 'organizer' WHERE id = ?", [$member]);
+$memberUser = db_one('SELECT * FROM users WHERE id = ?', [$member]);
+check('Organisator:in darf Events anlegen, ist aber kein Admin', can_organize($memberUser) && !is_admin($memberUser));
+
+echo "Konto löschen durch Admin\n";
+$leaver = create_user('weg@example.ch', 'Willi Weg', 'sehrgeheim123', 'de');
+$futureId = create_event($leaver, ['title' => 'Herbstlauf', 'description' => '', 'location' => 'Thun',
+    'starts_on' => date('Y-m-d', strtotime('+30 days')), 'ends_on' => date('Y-m-d', strtotime('+30 days')), 'retention_days' => 3]);
+$oldReg = registration_save(find_event($evId), $p, $leaver);      // Event abgeschlossen
+$openReg = registration_save(find_event($futureId), $p, $leaver); // Event offen
+$threw = false;
+try { delete_user_account($leaver); } catch (RuntimeException $e) { $threw = true; }
+check('Ohne Übernahme kein Löschen mit offenen Events', $threw && find_user_by_email('weg@example.ch') !== null);
+delete_user_account($leaver, $owner);
+check('Konto gelöscht', find_user_by_email('weg@example.ch') === null);
+check('Offenes Event an Admin übertragen', (int)find_event($futureId)['owner_id'] === $owner && team_role($futureId, $owner) === 'owner');
+check('Anmeldung an abgeschlossenem Event gelöscht', find_registration_by_token($oldReg['edit_token']) === null);
+$kept = find_registration_by_token($openReg['edit_token']);
+check('Anmeldung an offenem Event bleibt anonym', $kept !== null && $kept['user_id'] === null);
+
+echo "Vereinseinstellungen\n";
+check('Standardname ohne Einstellung', club_name() === config('app_name'));
+setting_set('club_name', 'SLRG Testsektion');
+check('Vereinsname gesetzt', club_name() === 'SLRG Testsektion');
+setting_set('default_lang', 'de');
+setting_set('home_text_de', 'Willkommen!');
+check('Text in eigener Sprache', setting_text('home_text', 'de') === 'Willkommen!');
+check('Rückfall auf Standardsprache', setting_text('home_text', 'fr') === 'Willkommen!');
+setting_set('home_text_fr', 'Bienvenue !');
+check('Text in Fremdsprache', setting_text('home_text', 'fr') === 'Bienvenue !');
+setting_set('enabled_langs', ['de', 'fr']);
+check('Aktive Sprachen', enabled_langs() === ['de', 'fr']);
+setting_set('enabled_langs', ['xx']);
+check('Ungültige Sprachen -> Rückfall', enabled_langs() === ['de']);
+check('Farbprüfung', valid_hex_color('#00a3e0') && !valid_hex_color('red') && !valid_hex_color('#00a3e0;}'));
+check('Kontrast hell/dunkel', contrast_text('#ffe600') === '#1c2230' && contrast_text('#003366') === '#ffffff');
+check('Abdunkeln', shade_color('#ffffff', -0.5) === '#808080');
+
+echo "Logo\n";
+$png = $tmp . '/test.png';
+file_put_contents($png, base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='));
+check('PNG wird akzeptiert', store_logo(['error' => UPLOAD_ERR_OK, 'size' => filesize($png), 'tmp_name' => $png]) === null);
+check('Logo gespeichert', logo_path() !== null && str_ends_with(logo_path(), 'logo.png'));
+$txt = $tmp . '/evil.png';
+file_put_contents($txt, '<script>alert(1)</script>');
+check('Keine Bilddatei wird abgelehnt', store_logo(['error' => UPLOAD_ERR_OK, 'size' => filesize($txt), 'tmp_name' => $txt]) !== null);
+check('Altes Logo bleibt bei Fehler', logo_path() !== null);
+remove_logo();
+check('Logo entfernt', logo_path() === null && logo_url() === 'assets/icon.svg');
+
+$_SERVER['HTTP_HOST'] = 'localhost';
+send_mail('x@example.ch', 'Test {club}', 'Gruss {club}');
+$last = glob($tmp . '/mail/*.json');
+usort($last, fn($a, $b) => filemtime($a) <=> filemtime($b));
+$found = array_filter(array_map(fn($f) => json_decode((string)file_get_contents($f), true), $last), fn($m) => $m['to'] === 'x@example.ch');
+$m = reset($found);
+check('Vereinsname in Mail ersetzt', $m && $m['subject'] === 'Test SLRG Testsektion' && $m['body'] === 'Gruss SLRG Testsektion');
+
+echo "Mail- und Systemeinstellungen\n";
+check('Startwerte aus config', mail_transport() === 'file' && setting('mail_from') === config('mail.from'));
+smtp_password_set('Ge#heim!42');
+check('SMTP-Passwort verschlüsselt gespeichert', !str_contains((string)db_one("SELECT value FROM settings WHERE key = 'mail_smtp_pass_enc'")['value'], 'Ge#heim'));
+check('SMTP-Passwort entschlüsselt', smtp_password() === 'Ge#heim!42' && has_smtp_password());
+smtp_password_set(null);
+check('SMTP-Passwort entfernt', !has_smtp_password());
+setting_set('contact_email', 'vorstand@example.ch');
+setting_set('mail_from_name', 'Notfall-Team');
+send_mail('y@example.ch', 'Reply', 'x');
+$eml = array_values(array_filter(glob($tmp . '/mail/*.eml'), fn($f) => str_contains((string)file_get_contents($f), 'To: y@example.ch')));
+$raw = $eml ? (string)file_get_contents($eml[0]) : '';
+check('Reply-To = Kontakt-E-Mail', str_contains($raw, "Reply-To: vorstand@example.ch"));
+check('Eigener Absendername', str_contains($raw, base64_encode('Notfall-Team')));
+setting_set('mail_from', 'kaputt');
+check('Ungültiger Absender wird gemeldet', !send_mail('y@example.ch', 'x', 'x') && mail_last_error() !== '');
+setting_set('mail_from', 'noreply@example.ch');
+setting_set('mail_transport', 'smtp');
+setting_set('mail_smtp_host', '127.0.0.1');
+setting_set('mail_smtp_port', 1);
+check('SMTP-Fehler wird gemeldet', !send_mail('y@example.ch', 'x', 'x') && str_contains(mail_last_error(), 'SMTP'));
+setting_set('mail_transport', 'file');
+setting_set('base_url', 'https://notfall.example.ch/');
+check('Basis-Adresse für Links', absolute_url('event', ['id' => 5]) === 'https://notfall.example.ch/index.php?r=event&id=5');
+check('Adressprüfung', valid_base_url('https://notfall.example.ch') && valid_base_url('http://localhost:8081/ec') && !valid_base_url('javascript:alert(1)') && !valid_base_url('https://x.ch/"><b>'));
+check('Hostprüfung', valid_hostname('smtp.example.ch') && valid_hostname('127.0.0.1') && !valid_hostname('smtp example') && !valid_hostname('-x.ch'));
+
 // Aufräumen
 db_exec('PRAGMA wal_checkpoint(TRUNCATE)');
 echo "\n$count Tests, $failures Fehler\n";

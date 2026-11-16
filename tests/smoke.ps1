@@ -1,5 +1,12 @@
 ﻿# End-to-End-Smoketest über HTTP:  .\tests\smoke.ps1 -BaseUrl http://localhost:8081
-param([Parameter(Mandatory = $true)][string]$BaseUrl)
+# Mit bestehender Datenbank ein Admin-Konto angeben, das die Test-Organisatorin freischaltet:
+#   .\tests\smoke.ps1 -BaseUrl http://localhost:8081 -AdminEmail admin@example.ch -AdminPassword ...
+# Ohne Admin-Angaben wird angenommen, dass die DB leer ist (erstes Konto wird Admin).
+param(
+    [Parameter(Mandatory = $true)][string]$BaseUrl,
+    [string]$AdminEmail = '',
+    [string]$AdminPassword = ''
+)
 
 $ErrorActionPreference = 'Stop'
 $BaseUrl = $BaseUrl.TrimEnd('/')
@@ -17,10 +24,35 @@ $orgMail = "orga$id@example.ch"
 # Organisator:in registrieren
 $org = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $r = Get-Page $org 'index.php?r=lang&l=de'
-Check 'Startseite erreichbar' ($r.StatusCode -eq 200 -and $r.Content -match 'Notfallkontakte')
+Check 'Startseite erreichbar' ($r.StatusCode -eq 200 -and $r.Content -match 'class="brand"')
 $r = Get-Page $org 'index.php?r=register'
 $r = Post-Page $org 'index.php?r=register' @{ _csrf = (Csrf $r.Content); name = 'Olga Orga'; email = $orgMail; password = 'sehrgeheim123'; password2 = 'sehrgeheim123' }
 Check 'Konto erstellt' ($r.Content -match 'Hallo Olga Orga')
+
+# Vereinsauftritt
+$r = Get-Page $org 'index.php?r=theme.css'
+Check 'Theme-CSS mit Vereinsfarbe' ($r.Content -match '--primary:#[0-9a-fA-F]{6}')
+$r = Get-Page $org 'index.php?r=legal'
+Check 'Impressum & Datenschutz erreichbar' ($r.Content -match 'Impressum' -and $r.Content -match 'Datenschutz')
+
+if ($AdminEmail) {
+    # Neues Konto darf noch keine Events anlegen
+    $code = try { (Get-Page $org 'index.php?r=event/new').StatusCode } catch { [int]$_.Exception.Response.StatusCode }
+    Check 'Ohne Freigabe kein Event' ($code -eq 403)
+    $code = try { (Get-Page $org 'index.php?r=admin').StatusCode } catch { [int]$_.Exception.Response.StatusCode }
+    Check 'Mitglied hat keinen Admin-Zugang' ($code -eq 403)
+
+    # Admin schaltet frei
+    $adm = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $r = Get-Page $adm 'index.php?r=login'
+    $r = Post-Page $adm 'index.php?r=login' @{ _csrf = (Csrf $r.Content); email = $AdminEmail; password = $AdminPassword }
+    $r = Get-Page $adm 'index.php?r=admin'
+    Check 'Admin-Einstellungen erreichbar' ($r.Content -match 'name="club_name"')
+    $r = Get-Page $adm "index.php?r=admin/users&q=$orgMail"
+    $uid = if ($r.Content -match 'name="user_id" value="(\d+)"') { $Matches[1] } else { $null }
+    $r = Post-Page $adm "index.php?r=admin/users&q=$orgMail" @{ _csrf = (Csrf $r.Content); user_id = $uid; role = 'organizer' }
+    Check 'Als Organisator:in freigegeben' ($r.Content -match 'Olga Orga ist jetzt Organisator')
+}
 
 # Event erstellen
 $r = Get-Page $org 'index.php?r=event/new'

@@ -12,7 +12,7 @@
     <?php require __DIR__ . '/_participant_fields.php'; ?>
     <fieldset>
       <legend><?= h(t('reg.consent_title')) ?></legend>
-      <p class="hint"><?= h(t('reg.consent_text', ['date' => format_date(access_until($event))])) ?></p>
+      <p class="hint"><?= h(t('reg.consent_text', ['date' => format_date(access_until($event))])) ?> <a href="<?= h(url('legal')) ?>#privacy" target="_blank" rel="noopener"><?= h(t('legal.privacy')) ?></a></p>
       <label class="check<?= isset($errors['consent']) ? ' has-error' : '' ?>"><input type="checkbox" name="consent" value="1"<?= !empty($_POST['consent']) ? ' checked' : '' ?>> <?= h(t('reg.consent_check')) ?></label>
       <?php if (isset($errors['consent'])): ?><small class="error"><?= h($errors['consent']) ?></small><?php endif; ?>
       <?php if ($user): ?>

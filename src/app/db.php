@@ -115,6 +115,13 @@ function db_migrate(): void
             'CREATE INDEX idx_access_reg ON access_log(registration_id)',
             'CREATE INDEX idx_access_event ON access_log(event_id)',
         ],
+        2 => [
+            // Rollen: user (nur eigene Anmeldungen), organizer (darf Events anlegen), admin (Verein verwalten)
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            "UPDATE users SET role = 'organizer' WHERE id IN (SELECT owner_id FROM events)",
+            "UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)",
+            'CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+        ],
     ];
 
     foreach ($migrations as $v => $statements) {

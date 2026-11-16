@@ -8,11 +8,11 @@ function i18n_init(?string $forced = null): void
     $lang = $forced;
     if ($lang === null && PHP_SAPI !== 'cli') {
         $lang = $_SESSION['lang'] ?? ($_COOKIE['lang'] ?? null);
-        if (!$lang) {
+        if (!$lang || !in_array($lang, enabled_langs(), true)) {
             $lang = detect_browser_lang();
         }
     }
-    set_lang($lang ?: config('default_lang'));
+    set_lang($lang ?: (string)setting('default_lang'));
 }
 
 function detect_browser_lang(): ?string
@@ -20,7 +20,7 @@ function detect_browser_lang(): ?string
     $header = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
     foreach (explode(',', $header) as $part) {
         $code = strtolower(substr(trim($part), 0, 2));
-        if (isset(SUPPORTED_LANGS[$code])) {
+        if (in_array($code, enabled_langs(), true)) {
             return $code;
         }
     }
@@ -30,7 +30,10 @@ function detect_browser_lang(): ?string
 function set_lang(string $lang): void
 {
     if (!isset(SUPPORTED_LANGS[$lang])) {
-        $lang = config('default_lang');
+        $lang = function_exists('setting') ? (string)setting('default_lang', 'de') : 'de';
+        if (!isset(SUPPORTED_LANGS[$lang])) {
+            $lang = 'de';
+        }
     }
     $GLOBALS['lang'] = $lang;
     $GLOBALS['strings'] = require APP_DIR . '/lang/' . $lang . '.php';

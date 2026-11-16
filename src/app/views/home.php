@@ -1,14 +1,23 @@
-<?php $title = ''; ?>
+<?php
+$title = '';
+$homeTitle = setting_text('home_title') ?: t('home.title');
+$homeText = setting_text('home_text');
+?>
 <section class="hero">
-  <h1><?= h(t('home.title')) ?></h1>
-  <p class="lead"><?= h(t('home.lead')) ?></p>
+  <p class="eyebrow"><?= h(club_name()) ?></p>
+  <h1><?= h($homeTitle) ?></h1>
+  <?php if ($homeText !== ''): ?>
+    <p class="lead home-text"><?= h($homeText) ?></p>
+  <?php else: ?>
+    <p class="lead"><?= h(t('home.lead')) ?></p>
+  <?php endif; ?>
   <div class="actions">
     <?php if ($user): ?>
-      <a class="btn btn-primary" href="<?= h(url('event/new')) ?>"><?= h(t('dashboard.new_event')) ?></a>
-      <a class="btn" href="<?= h(url('dashboard')) ?>"><?= h(t('nav.dashboard')) ?></a>
+      <?php if (can_organize($user)): ?><a class="btn btn-primary" href="<?= h(url('event/new')) ?>"><?= h(t('dashboard.new_event')) ?></a><?php endif; ?>
+      <a class="btn<?= can_organize($user) ? '' : ' btn-primary' ?>" href="<?= h(url('dashboard')) ?>"><?= h(t('nav.dashboard')) ?></a>
     <?php else: ?>
-      <a class="btn btn-primary" href="<?= h(url('register')) ?>"><?= h(t('home.cta_register')) ?></a>
-      <a class="btn" href="<?= h(url('login')) ?>"><?= h(t('nav.login')) ?></a>
+      <a class="btn btn-primary" href="<?= h(url('login')) ?>"><?= h(t('nav.login')) ?></a>
+      <a class="btn" href="<?= h(url('register')) ?>"><?= h(t('nav.register')) ?></a>
     <?php endif; ?>
   </div>
 </section>

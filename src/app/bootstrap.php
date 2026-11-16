@@ -78,6 +78,7 @@ require APP_DIR . '/helpers.php';
 require APP_DIR . '/db.php';
 require APP_DIR . '/crypto.php';
 require APP_DIR . '/i18n.php';
+require APP_DIR . '/settings.php';
 require APP_DIR . '/auth.php';
 require APP_DIR . '/mailer.php';
 require APP_DIR . '/participant.php';

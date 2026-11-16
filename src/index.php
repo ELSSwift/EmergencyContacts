@@ -10,7 +10,7 @@ $route = get_str('r', 50);
 // Sprachwechsel
 if ($route === 'lang') {
     $lang = get_str('l', 5);
-    if (isset(SUPPORTED_LANGS[$lang])) {
+    if (in_array($lang, enabled_langs(), true)) {
         $_SESSION['lang'] = $lang;
         setcookie('lang', $lang, ['expires' => time() + 31536000, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax']);
         if ($u = current_user()) {
@@ -130,23 +130,12 @@ switch ($route) {
                 $full = db_one('SELECT * FROM users WHERE id = ?', [$user['id']]);
                 if (!password_verify((string)($_POST['confirm_password'] ?? ''), $full['password_hash'])) {
                     $errors['confirm_password'] = t('auth.invalid_password');
-                } elseif (db_one("SELECT 1 FROM events WHERE owner_id = ? AND purged_at IS NULL", [$user['id']])) {
+                } elseif (user_open_event_count((int)$user['id']) > 0) {
                     $errors['confirm_password'] = t('account.delete_has_events');
+                } elseif (is_admin($user) && admin_count() <= 1) {
+                    $errors['confirm_password'] = t('account.delete_last_admin');
                 } else {
-                    $pdo = db();
-                    $pdo->beginTransaction();
-                    // Eigene Anmeldungen an laufenden Events werden anonym (und später automatisch gelöscht),
-                    // abgeschlossene werden sofort gelöscht.
-                    foreach (db_all('SELECT e.*, r.id AS reg_id FROM registrations r JOIN events e ON e.id = r.event_id WHERE r.user_id = ?', [$user['id']]) as $row) {
-                        if (!event_access_active($row)) {
-                            db_exec('DELETE FROM access_log WHERE registration_id = ?', [$row['reg_id']]);
-                            db_exec('DELETE FROM registrations WHERE id = ?', [$row['reg_id']]);
-                        }
-                    }
-                    // Es sind nur noch abgeschlossene eigene Events vorhanden (siehe Prüfung oben)
-                    db_exec('DELETE FROM events WHERE owner_id = ?', [$user['id']]);
-                    db_exec('DELETE FROM users WHERE id = ?', [$user['id']]);
-                    $pdo->commit();
+                    delete_user_account((int)$user['id']);
                     logout_user();
                     flash('success', t('account.deleted'));
                     redirect(url());
@@ -178,9 +167,14 @@ switch ($route) {
     // --------------------------------------------------------------- Events
     case 'event/new':
         $user = require_login();
+        if (!can_organize($user)) {
+            http_response_code(403);
+            render('error', ['message' => t('event.not_allowed', ['club' => club_name()])]);
+            break;
+        }
         $errors = [];
         $event = ['title' => '', 'description' => '', 'location' => '', 'starts_on' => '', 'ends_on' => '',
-                  'retention_days' => (int)config('default_retention_days'), 'registration_open' => true];
+                  'retention_days' => (int)setting('default_retention_days'), 'registration_open' => true];
         if (is_post()) {
             require_post();
             $event = event_from_post();
@@ -418,12 +412,213 @@ switch ($route) {
         render('reg_mine', compact('reg', 'event', 'data', 'errors', 'log', 'user', 'canEdit'));
         break;
 
+    // ------------------------------------------------------- Vereinsauftritt
+    case 'theme.css':
+        $c = valid_hex_color((string)setting('primary_color')) ? (string)setting('primary_color') : '#b3261e';
+        header('Content-Type: text/css; charset=utf-8');
+        header('Cache-Control: public, max-age=86400');
+        echo ":root{--primary:$c;--primary-hover:" . shade_color($c, -0.18) . ';--on-primary:' . contrast_text($c) . ";}\n";
+        echo "@media (prefers-color-scheme: dark){:root{--primary:" . shade_color($c, 0.25) . ';--primary-hover:' . shade_color($c, 0.4) . ';--on-primary:' . contrast_text(shade_color($c, 0.25)) . ";}}\n";
+        exit;
+
+    case 'logo':
+        $path = logo_path() ?? not_found();
+        $mime = array_search(pathinfo($path, PATHINFO_EXTENSION), LOGO_TYPES, true);
+        header('Content-Type: ' . $mime);
+        header('Cache-Control: public, max-age=31536000, immutable');
+        header('Content-Length: ' . filesize($path));
+        readfile($path);
+        exit;
+
+    case 'legal':
+        render('legal', [
+            'imprint' => trim((string)setting('imprint', '')),
+            'privacy' => setting_text('privacy'),
+        ]);
+        break;
+
+    // ---------------------------------------------------------------- Admin
+    case 'admin':
+        $user = require_admin();
+        $errors = [];
+        $s = settings_all();
+        if (is_post()) {
+            require_post();
+            $action = post_str('action', 20);
+            if ($action === 'logo_remove') {
+                remove_logo();
+                flash('success', t('admin.logo_removed'));
+                redirect(url('admin') . '#logo');
+            }
+            if ($action === 'logo') {
+                if ($err = store_logo($_FILES['logo'] ?? [])) {
+                    flash('error', $err);
+                } else {
+                    flash('success', t('admin.logo_saved'));
+                }
+                redirect(url('admin') . '#logo');
+            }
+            if ($action === 'mail' || $action === 'mail_test') {
+                $mail = [
+                    'mail_transport' => post_str('mail_transport', 10),
+                    'mail_from' => post_str('mail_from', 190),
+                    'mail_from_name' => post_str('mail_from_name', 120),
+                    'mail_reply_to' => post_str('mail_reply_to', 190),
+                    'mail_smtp_host' => post_str('mail_smtp_host', 253),
+                    'mail_smtp_port' => (int)post_str('mail_smtp_port', 5),
+                    'mail_smtp_secure' => post_str('mail_smtp_secure', 3),
+                    'mail_smtp_user' => post_str('mail_smtp_user', 190),
+                ];
+                $pass = (string)($_POST['mail_smtp_pass'] ?? '');
+                if (!in_array($mail['mail_transport'], MAIL_TRANSPORTS, true)) {
+                    $errors['mail_transport'] = t('validation.required');
+                }
+                if (!valid_email($mail['mail_from'])) {
+                    $errors['mail_from'] = t('validation.email');
+                }
+                if ($mail['mail_reply_to'] !== '' && !valid_email($mail['mail_reply_to'])) {
+                    $errors['mail_reply_to'] = t('validation.email');
+                }
+                if (!in_array($mail['mail_smtp_secure'], SMTP_SECURE, true)) {
+                    $mail['mail_smtp_secure'] = '';
+                }
+                if ($mail['mail_transport'] === 'smtp') {
+                    if (!valid_hostname($mail['mail_smtp_host'])) {
+                        $errors['mail_smtp_host'] = t('admin.smtp_host_invalid');
+                    }
+                    if ($mail['mail_smtp_port'] < 1 || $mail['mail_smtp_port'] > 65535) {
+                        $errors['mail_smtp_port'] = t('admin.smtp_port_invalid');
+                    }
+                } elseif ($mail['mail_smtp_port'] < 1 || $mail['mail_smtp_port'] > 65535) {
+                    $mail['mail_smtp_port'] = 587;
+                }
+                if (strlen($pass) > 500 || preg_match('/[\r\n]/', $pass)) {
+                    $errors['mail_smtp_pass'] = t('admin.smtp_pass_invalid');
+                }
+                if (!$errors) {
+                    foreach ($mail as $k => $v) {
+                        setting_set($k, $v);
+                    }
+                    if (!empty($_POST['mail_smtp_pass_clear'])) {
+                        smtp_password_set(null);
+                    } elseif ($pass !== '') {
+                        smtp_password_set($pass);
+                    }
+                    if ($action === 'mail_test') {
+                        $ok = send_mail($user['email'], t('admin.mail_test_subject'), t('admin.mail_test_body', ['name' => $user['name']]));
+                        $ok ? flash('success', t('admin.mail_test_sent', ['email' => $user['email']]))
+                            : flash('error', t('admin.mail_test_failed', ['error' => mail_last_error()]));
+                    } else {
+                        flash('success', t('admin.mail_saved'));
+                    }
+                    redirect(url('admin') . '#mail');
+                }
+                $s = $mail + $s;
+                render('admin_settings', compact('s', 'errors'));
+                break;
+            }
+            // Allgemeine Einstellungen
+            $new = [
+                'base_url' => rtrim(post_str('base_url', 300), '/'),
+                'club_name' => post_str('club_name', 120),
+                'primary_color' => post_str('primary_color', 7),
+                'contact_email' => post_str('contact_email', 190),
+                'website' => post_str('website', 300),
+                'imprint' => post_str('imprint', 5000),
+                'default_lang' => post_str('default_lang', 5),
+                'default_retention_days' => (int)post_str('default_retention_days', 3),
+                'enabled_langs' => array_values(array_intersect(array_keys(SUPPORTED_LANGS), array_filter((array)($_POST['enabled_langs'] ?? []), 'is_string'))),
+            ];
+            foreach (array_keys(SUPPORTED_LANGS) as $l) {
+                $new['home_title_' . $l] = post_str('home_title_' . $l, 200);
+                $new['home_text_' . $l] = post_str('home_text_' . $l, 5000);
+                $new['privacy_' . $l] = post_str('privacy_' . $l, 20000);
+            }
+            if ($new['club_name'] === '') {
+                $errors['club_name'] = t('validation.required');
+            }
+            if ($new['base_url'] !== '' && !valid_base_url($new['base_url'])) {
+                $errors['base_url'] = t('admin.base_url_invalid');
+            }
+            if (!valid_hex_color($new['primary_color'])) {
+                $errors['primary_color'] = t('admin.color_invalid');
+            }
+            if ($new['contact_email'] !== '' && !valid_email($new['contact_email'])) {
+                $errors['contact_email'] = t('validation.email');
+            }
+            if ($new['website'] !== '' && !preg_match('#^https?://[^\s<>"]+$#i', $new['website'])) {
+                $errors['website'] = t('admin.website_invalid');
+            }
+            if (!$new['enabled_langs']) {
+                $errors['enabled_langs'] = t('admin.langs_required');
+            } elseif (!in_array($new['default_lang'], $new['enabled_langs'], true)) {
+                $errors['default_lang'] = t('admin.default_lang_disabled');
+            }
+            if ($new['default_retention_days'] < 0 || $new['default_retention_days'] > 90) {
+                $errors['default_retention_days'] = t('validation.retention');
+            }
+            if (!$errors) {
+                foreach ($new as $k => $v) {
+                    setting_set($k, $v);
+                }
+                if (!in_array(current_lang(), $new['enabled_langs'], true)) {
+                    $_SESSION['lang'] = $new['default_lang'];
+                }
+                flash('success', t('admin.saved'));
+                redirect(url('admin'));
+            }
+            $s = $new + $s;
+        }
+        render('admin_settings', compact('s', 'errors'));
+        break;
+
+    case 'admin/users':
+        $user = require_admin();
+        if (is_post()) {
+            require_post();
+            $uid = (int)post_str('user_id');
+            $role = post_str('role', 20);
+            $target = db_one('SELECT * FROM users WHERE id = ?', [$uid]) ?? not_found();
+            if (post_str('action', 20) === 'delete') {
+                if ($uid === (int)$user['id']) {
+                    flash('error', t('admin.cannot_delete_self'));
+                } else {
+                    $moved = user_open_event_count($uid);
+                    delete_user_account($uid, (int)$user['id']);
+                    flash('success', t('admin.user_deleted', ['name' => $target['name']])
+                        . ($moved > 0 ? ' ' . t('admin.events_transferred', ['count' => $moved]) : ''));
+                }
+            } elseif (!in_array($role, ROLES, true)) {
+                flash('error', t('error.not_found'));
+            } elseif ($uid === (int)$user['id'] && $role !== 'admin') {
+                flash('error', t('admin.cannot_demote_self'));
+            } else {
+                db_exec('UPDATE users SET role = ? WHERE id = ?', [$role, $uid]);
+                if ($role !== 'user' && $target['role'] === 'user') {
+                    send_mail($target['email'], t_lang($target['lang'], 'mail.organizer.subject', ['club' => club_name()]),
+                        t_lang($target['lang'], 'mail.organizer.body', ['name' => $target['name'], 'club' => club_name(), 'link' => absolute_url('event/new')]));
+                }
+                flash('success', t('admin.role_changed', ['name' => $target['name'], 'role' => t('role.' . $role)]));
+            }
+            redirect(url('admin/users', ['q' => get_str('q', 100)]));
+        }
+        $q = get_str('q', 100);
+        $users = $q === ''
+            ? db_all('SELECT u.id, u.name, u.email, u.role, u.created_at, (SELECT COUNT(*) FROM events e WHERE e.owner_id = u.id) AS events, (SELECT COUNT(*) FROM events e WHERE e.owner_id = u.id AND e.purged_at IS NULL) AS open_events FROM users u ORDER BY CASE u.role WHEN \'admin\' THEN 0 WHEN \'organizer\' THEN 1 ELSE 2 END, u.name')
+            : db_all('SELECT u.id, u.name, u.email, u.role, u.created_at, (SELECT COUNT(*) FROM events e WHERE e.owner_id = u.id) AS events, (SELECT COUNT(*) FROM events e WHERE e.owner_id = u.id AND e.purged_at IS NULL) AS open_events FROM users u WHERE u.name LIKE ? OR u.email LIKE ? ORDER BY u.name', ['%' . $q . '%', '%' . $q . '%']);
+        render('admin_users', compact('users', 'q', 'user'));
+        break;
+
     // ------------------------------------------------------------------ DEV
     case 'dev/mail':
-        if (config('env') !== 'dev' || config('mail.transport') !== 'file') {
+        // Postausgang: bei Versandart „ablegen“ für Admins, auf DEV für alle Angemeldeten
+        if (mail_transport() !== 'file') {
             not_found();
         }
-        require_login();
+        $viewer = require_login();
+        if (config('env') !== 'dev' && !is_admin($viewer)) {
+            not_found();
+        }
         $mails = [];
         foreach (array_reverse(glob(config('data_dir') . '/mail/*.json') ?: []) as $f) {
             $m = json_decode((string)file_get_contents($f), true);

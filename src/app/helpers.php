@@ -31,8 +31,8 @@ function url(string $route = '', array $params = []): string
 /** Absolute URL für E-Mails. */
 function absolute_url(string $route = '', array $params = []): string
 {
-    $base = config('base_url');
-    if (!$base) {
+    $base = function_exists('setting') ? (string)setting('base_url', '') : '';
+    if ($base === '') {
         $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
         $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/');
@@ -168,7 +168,13 @@ function field(string $name, string $label, mixed $value, array $errors = [], ar
     }
     $html = '<div class="field' . ($err ? ' has-error' : '') . (isset($opt['class']) ? ' ' . h($opt['class']) : '') . '">';
     $html .= '<label for="' . $id . '">' . h($label) . (!empty($opt['required']) ? ' <span class="req" aria-hidden="true">*</span>' : '') . '</label>';
-    if ($type === 'textarea') {
+    if ($type === 'select') {
+        $html .= '<select id="' . $id . '" name="' . h($name) . '"' . $attrs . '>';
+        foreach ($opt['options'] ?? [] as $v => $l) {
+            $html .= '<option value="' . h($v) . '"' . ((string)$v === (string)$value ? ' selected' : '') . '>' . h($l) . '</option>';
+        }
+        $html .= '</select>';
+    } elseif ($type === 'textarea') {
         $html .= '<textarea id="' . $id . '" name="' . h($name) . '" rows="' . (int)($opt['rows'] ?? 3) . '"' . $attrs . '>' . h($value) . '</textarea>';
     } else {
         $html .= '<input type="' . h($type) . '" id="' . $id . '" name="' . h($name) . '" value="' . h($value) . '"' . $attrs . '>';
